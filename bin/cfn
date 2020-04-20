@@ -1,0 +1,257 @@
+#!/bin/bash
+
+set -fuo pipefail
+IFS=$'\n\t'
+
+export AWS_DEFAULT_OUTPUT="json"
+
+DEFAULT_NAMESPACE='cfn'
+DEFAULT_TEMPLATE='cfn.yaml'
+
+function cached_value {
+    local key=$1
+    touch .cfn
+    grep -m 1 -E "^$key=" .cfn | sed 's/.*=//'
+}
+
+function set_cached_value {
+    local key=$1
+    local value=$2
+    touch .cfn
+    new_cfn=$(mktemp)
+    grep -v -E "^$key=" .cfn >> ${new_cfn}
+    echo "$key=$value" >> ${new_cfn}
+    mv ${new_cfn} .cfn
+}
+
+CFN_NAMESPACE=${CFN_NAMESPACE:-$(cached_value namespace)}
+CFN_NAMESPACE=${CFN_NAMESPACE:-$DEFAULT_NAMESPACE}
+CFN_STACK=${CFN_STACK:-$(cached_value stack)}
+CFN_TEMPLATE=${CFN_TEMPLATE:-$(cached_value template)}
+CFN_TEMPLATE=${CFN_TEMPLATE:-$DEFAULT_TEMPLATE}
+
+function print_usage {
+    cat <<EOF
+usage: cfn [-h] [-n <namespace>] [-s <stack>] [-t <template>] [<command>]
+EOF
+}
+
+function print_help {
+    print_usage
+    cat <<EOF
+Manipulate AWS CloudFormation stacks.
+
+  -n <namespace>
+                 operate within namespace and remember for next time
+                   (default $DEFAULT_NAMESPACE)
+  -s <stack>
+                 operate on stack and remember for next time
+  -t <template>
+                 relative local path to CloudFormation template and
+                   remember for next time (default $DEFAULT_TEMPLATE)
+  -h
+                 print this message and exit
+
+Valid commands are:
+
+   create        create new stack
+   update        update existing stack
+   delete        delete stack
+   doctor        help diagnose problems with stack
+   status        check on status of stack
+   list          list all stacks
+EOF
+}
+
+while getopts ":hn:s:t:" opt; do
+    case ${opt} in
+        h )
+            print_help
+            exit 0
+            ;;
+        \? )
+            echo "Invalid option: -${OPTARG}" 1>&2
+            print_usage 1>&2
+            exit 1
+            ;;
+        : )
+            echo "Invalid option: ${OPTARG} requires an argument" 1>&2
+            print_usage 1>&2
+            exit 1
+            ;;
+        t )
+	    if [[ ! -f ${OPTARG} ]]; then
+		echo "File not found: ${OPTARG}" > /dev/stderr
+		exit 2
+	    fi
+	    
+            CFN_TEMPLATE=${OPTARG}
+            set_cached_value template ${CFN_TEMPLATE}
+            ;;
+        s )
+            CFN_STACK=${OPTARG}
+            set_cached_value stack ${CFN_STACK}
+            ;;
+        n )
+            CFN_NAMESPACE=${OPTARG}
+            set_cached_value namespace ${CFN_NAMESPACE}
+            ;;
+    esac
+done
+shift $((OPTIND -1))
+
+if [[ -z $CFN_STACK ]]; then
+    echo "error: please specify a stack at least once with -s flag" 2>&1
+    print_usage 2>&1
+    exit 1
+fi
+
+STACK="$CFN_NAMESPACE-$CFN_STACK"
+
+if ! (($# >= 1)); then
+    # Allows user to do -s and stuff
+    exit 0
+fi
+
+subcommand=$1
+shift
+
+function cfs {
+    local cmd=$1
+    shift
+    if (($# > 0)); then
+	if [[ $1 = '-'* ]]; then
+	    aws cloudformation $cmd --stack-name $STACK "$@"
+	else
+	    local subcommand=$1
+	    shift
+	    aws cloudformation $cmd $subcommand --stack-name $STACK "$@"
+	fi
+    else
+	aws cloudformation $cmd --stack-name $STACK "$@"
+    fi
+}
+
+function validate_template {
+    aws cloudformation validate-template --template-body "file://${CFN_TEMPLATE}"
+}
+
+function describe_stack {
+    cfs describe-stacks \
+	| jq -r '(["NAME", "STATUS", "DRIFT STATUS"] | (., map(length*"-"))), (.Stacks[0] | [.StackName, .StackStatus, .DriftInformation.StackDriftStatus]) | @tsv' \
+	| column -s $'\t' -t
+}
+
+function doctor {
+    cfs describe-stack-events \
+	| jq -r '.StackEvents[] | select(.ResourceStatus | test("FAILED")) | del(.StackId,.StackName,.EventId)'
+}
+
+function instance_id_of {
+    local logical_id=$1
+    cfs describe-stack-resource --logical-resource-id $1 \
+	| jq -r '.StackResourceDetail.PhysicalResourceId'
+}
+
+function wait_for_send_command {
+    local sh_command_id=$1
+    while :
+    do
+	if aws ssm list-command-invocations --command-id $sh_command_id --details --output json \
+		| jq -r '.CommandInvocations[].CommandPlugins[].Status' \
+		| grep -qF InProgress
+	then
+	    sleep 1
+	    echo Waiting for command-id $sh_command_id
+	    continue
+	else
+	    break
+	fi
+    done
+}
+
+case ${subcommand} in
+    create )
+        # Provide CAPABILITY_NAMED_IAM otherwise templates that create
+        # IAM Roles won't work
+	validate_template
+        if cfs create-stack --template-body "file://${CFN_TEMPLATE}" --capabilities "CAPABILITY_NAMED_IAM"
+	then
+	    if cfs wait "stack-create-complete"
+	    then
+		cfs describe-stacks
+	    else
+		doctor
+	    fi
+	fi
+        exit
+        ;;
+    delete )
+	cfs delete-stack
+	exit
+	;;
+    drift )
+	cfs detect-stack-drift
+	exit
+	;;
+    start-session )
+	instance_id=$(instance_id_of $1)
+	echo aws ssm start-session --target $instance_id
+	aws ssm start-session --target $instance_id
+	exit
+	;;
+    describe )
+	cfs describe-stack-resource --logical-resource-id $1
+	exit
+	;;
+    update )
+        if cfs update-stack --template-body "file://${CFN_TEMPLATE}"  --capabilities "CAPABILITY_NAMED_IAM"; then
+	    if cfs wait "stack-update-complete"; then
+		cfs describe-stacks
+	    else
+		doctor
+	    fi
+	fi
+        exit
+        ;;
+    status )
+	describe_stack
+	exit
+	;;
+    resources )
+	cfs describe-stack-resources | jq -r '.StackResources[] | [.LogicalResourceId, (.ResourceType | sub("^AWS::"; "")), .ResourceStatus, .DriftInformation.StackResourceDriftStatus] | @tsv' | column -s $'\t' -t
+	exit
+	;;
+    doctor )
+	doctor
+	exit
+	;;
+
+    run-command )
+	instance_id=$(instance_id_of $1)
+	shift
+	IFS=' ' sh_command_id=$(aws ssm send-command --instance-ids $instance_id \
+				    --document-name "AWS-RunShellScript" \
+				    --comment "cfn run-command for $STACK" \
+				    --parameters commands="$*" \
+				    --output text \
+				    --query "Command.CommandId")
+	#sleep 5
+		
+	#aws ssm list-command-invocations --command-id $sh_command_id --details --output json \
+	#    | jq -r '.CommandInvocations[].CommandPlugins[].Output' \
+	#    | grep -qF InProgress
+	wait_for_send_command $sh_command_id
+	aws ssm list-command-invocations --command-id $sh_command_id --details --output json
+	exit
+	;;
+    list )
+	aws cloudformation list-stacks | jq -r '(["NAME", "STATUS"] | (., map(length*"-"))), (.StackSummaries[] | select(.StackStatus | test("DELETE") | not) | [.StackName, .StackStatus]) | @tsv' | column -s $'\t' -t
+	exit
+	;;
+    * )
+        echo "error: unrecognized command: $subcommand" 2>&1
+        print_usage 2>&1
+        exit 1
+esac
+exit
