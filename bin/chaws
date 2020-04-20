@@ -81,10 +81,11 @@ then
     if [[ $return_code != 0 ]]
     then
 	cat 1>&2 "$cached_stderr"
+	rm -f "$last_file"
 	exit $return_code
     else
 	mv "$cli_stdout" "$cached_stdout"
-	echo "$cached_results_dir" > "$metadata_dir"/last
+	echo "$cached_results_dir" > "$last_file"
     fi
 fi
 
