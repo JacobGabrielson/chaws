@@ -1,21 +1,6 @@
 #!/bin/bash
 # -*- mode: sh-bash -*-
 
-set -o pipefail
-set -o errtrace
-trap 'err_handler $?' ERR
-
-err_handler() {
-    trap - ERR
-    let i=0 exit_status=$1
-    echo "Aborting on error $exit_status:"
-    echo "--------------------"
-    while caller $i; do ((i++)); done
-    exit $?
-}
-    
-#set -x
-
 # Produce short hash just as insurance in case the directory scheme
 # produces a collision. For example "s3 ls a@" and "s3 ls a_" both
 # wind up in .chaws-cache/s3/ls/a/ so there needs to be a final
@@ -67,27 +52,22 @@ mkdir -p "$cached_results_dir"
 
 if [[ ! -f $cached_return_code || -n ${CHAWS_REFRESH+x} ]]
 then
-    cli_stdout=$(mktemp --tmpdir="$cached_results_dir" 'cli_stdoutXXXXX.out')
-    # shellcheck disable=SC2064
-    trap "rm -f '$cli_stdout'" EXIT
-    rm -f "$cached_stderr"
+    rm -f "$cached_stderr" "$cached_stdout"
 
-    set +e
     echo aws "$@" >"$cached_args"
-    aws "$@" >"$cli_stdout" 2>"$cached_stderr"
+    aws "$@" >"$cached_stdout" 2>"$cached_stderr"
     return_code=$?
     echo $return_code >"$cached_return_code"
-    set -e
-    if [[ $return_code != 0 ]]
+    if (( return_code != 0 ))
     then
-	cat 1>&2 "$cached_stderr"
 	rm -f "$last_file"
-	exit $return_code
     else
-	mv "$cli_stdout" "$cached_stdout"
 	echo "$cached_results_dir" > "$last_file"
     fi
+else
+    read -r return_code <"$cached_return_code"
 fi
 
-cat "$cached_stdout"
-exit
+[[ -f $cached_stdout ]] && cat "$cached_stdout"
+[[ -f $cached_stderr ]] && cat 1>&2 "$cached_stderr"
+exit "$return_code"
