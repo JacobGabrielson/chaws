@@ -1,5 +1,5 @@
 #!/bin/bash
-# -*-* mode: sh-bash -*-
+# -*- mode: sh-bash -*-
 
 set -o pipefail
 set -o errtrace
@@ -42,15 +42,28 @@ CHAWS_CACHE_DIR=${CHAWS_CACHE_DIR-.chaws-cache}
 
 metadata_dir="${CHAWS_CACHE_DIR}/.metadata"
 mkdir -p "$metadata_dir"
+last_file=$metadata_dir/last
 
-cached_results_dir=${CHAWS_CACHE_DIR}/$(args_to_dir "$@")/$(hexsum "$@")
-
-mkdir -p "$cached_results_dir"
+case $1 in
+    last )
+	if [[ ! -f $last_file ]]
+	then
+	    echo 1>&2 Run a command successfully first
+	    exit 1
+	fi
+	read -r cached_results_dir < "$last_file"
+	;;
+    * )
+	cached_results_dir=${CHAWS_CACHE_DIR}/$(args_to_dir "$@")/$(hexsum "$@")
+	;;
+esac
 
 cached_stdout=$cached_results_dir/stdout.out
 cached_stderr=$cached_results_dir/stderrr.out
 cached_return_code=$cached_results_dir/return-code
 cached_args=$cached_results_dir/args
+
+mkdir -p "$cached_results_dir"
 
 if [[ ! -f $cached_return_code || -n ${CHAWS_REFRESH+x} ]]
 then
@@ -71,6 +84,7 @@ then
 	exit $return_code
     else
 	mv "$cli_stdout" "$cached_stdout"
+	echo "$cached_results_dir" > "$metadata_dir"/last
     fi
 fi
 
