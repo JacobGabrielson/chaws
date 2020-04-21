@@ -230,9 +230,11 @@ case ${subcommand} in
     run-command )
 	instance_id=$(instance_id_of $1)
 	shift
+	comment="cfn $STACK: $*"
+	set -e
 	IFS=' ' sh_command_id=$(aws ssm send-command --instance-ids $instance_id \
 				    --document-name "AWS-RunShellScript" \
-				    --comment "cfn run-command for $STACK" \
+				    --comment "${comment:0:100}" \
 				    --parameters commands="$*" \
 				    --output text \
 				    --query "Command.CommandId")
@@ -242,8 +244,17 @@ case ${subcommand} in
 	#    | jq -r '.CommandInvocations[].CommandPlugins[].Output' \
 	#    | grep -qF InProgress
 	wait_for_send_command $sh_command_id
-	aws ssm list-command-invocations --command-id $sh_command_id --details --output json
-	exit
+	CHAWS_SUPPRESS_STDOUT='' chaws ssm list-command-invocations --command-id $sh_command_id --details --output json
+	remote_rc=$(chaws last | jq -r '.CommandInvocations[].CommandPlugins[0].ResponseCode')
+	remote_output=$(chaws last | jq -r '.CommandInvocations[].CommandPlugins[0].Output')
+	if ((remote_rc == 0))
+	then
+	    cat <<<"$remote_output"
+	else
+	    cat 1>&2 <<<"$remote_output"
+	fi
+	
+	exit "$remote_rc"
 	;;
     list )
 	aws cloudformation list-stacks | jq -r '(["NAME", "STATUS"] | (., map(length*"-"))), (.StackSummaries[] | select(.StackStatus | test("DELETE") | not) | [.StackName, .StackStatus]) | @tsv' | column -s $'\t' -t

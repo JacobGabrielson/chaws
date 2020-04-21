@@ -68,6 +68,6 @@ else
     read -r return_code <"$cached_return_code"
 fi
 
-[[ -f $cached_stdout ]] && cat "$cached_stdout"
+[[ -z ${CHAWS_SUPPRESS_STDOUT+x} && -f $cached_stdout ]] && cat "$cached_stdout"
 [[ -f $cached_stderr ]] && cat 1>&2 "$cached_stderr"
 exit "$return_code"
