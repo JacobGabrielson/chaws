@@ -147,10 +147,10 @@ function doctor {
 	| jq -r '.StackEvents[] | select(.ResourceStatus | test("FAILED")) | del(.StackId,.StackName,.EventId)'
 }
 
-function instance_id_of {
+instance_id_of() {
     local logical_id=$1
-    cfs describe-stack-resource --logical-resource-id $1 \
-	| jq -r '.StackResourceDetail.PhysicalResourceId'
+    cfs describe-stack-resource --logical-resource-id $logical_id \
+	    | jq -r '.StackResourceDetail.PhysicalResourceId'
 }
 
 function wait_for_send_command {
@@ -195,6 +195,7 @@ case ${subcommand} in
 	exit
 	;;
     start-session )
+	set -e
 	instance_id=$(instance_id_of $1)
 	echo aws ssm start-session --target $instance_id
 	aws ssm start-session --target $instance_id
