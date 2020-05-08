@@ -220,7 +220,7 @@ case ${subcommand} in
 	exit
 	;;
     resources )
-	cfs describe-stack-resources | jq -r '.StackResources[] | [.LogicalResourceId, (.ResourceType | sub("^AWS::"; "")), .ResourceStatus, .DriftInformation.StackResourceDriftStatus] | @tsv' | column -s $'\t' -t
+	cfs describe-stack-resources | jq -r '(["NAME", "TYPE", "ID", "STATUS", "DRIFT"] | (., map(length*"-"))), (.StackResources[] | [.LogicalResourceId, (.ResourceType | sub("^AWS::"; "")), .PhysicalResourceId, .ResourceStatus, .DriftInformation.StackResourceDriftStatus]) | @tsv' | column -s $'\t' -t
 	exit
 	;;
     doctor )
